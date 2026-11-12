@@ -71,6 +71,10 @@
 		restartPollFast();
 	}
 
+	// 修改/删除/恢复只在前一步成功时才 saveenv；失败由命令自身的错误输出体现。
+	// 连接状态 ✓ 只表示与设备通信正常，不表示保存成功。
+	var SAVE_TAIL = ' && saveenv';
+
 	function getInput() {
 		return terminalInput.value.trim();
 	}
@@ -177,19 +181,19 @@
 		var n = getInput();
 		if (!n) { alert('输入变量名'); return; }
 		var v = prompt('修改 ' + n + ' 的值:');
-		if (v !== null) { postAndPoll('setenv ' + n + ' ' + v + '; saveenv'); }
+		if (v !== null) { postAndPoll('setenv ' + n + ' ' + v + SAVE_TAIL); }
 	});
 
 	document.getElementById('deleteEnv').addEventListener('click', function () {
 		var n = getInput();
 		if (!n) { alert('输入变量名'); return; }
-		if (confirm('确认删除 ' + n + '？')) { postAndPoll('setenv ' + n + '; saveenv'); }
+		if (confirm('确认删除 ' + n + '？')) { postAndPoll('setenv ' + n + SAVE_TAIL); }
 	});
 
 	document.getElementById('resetEnv').addEventListener('click', function () {
 		var n = getInput();
 		var msg = n ? '将 ' + n + ' 重置为缺省值？' : '重置全部为缺省值？';
-		var cmd = n ? 'env default -f ' + n + '; saveenv' : 'env default -a; saveenv';
+		var cmd = (n ? 'env default -f ' + n : 'env default -a') + SAVE_TAIL;
 		if (confirm(msg)) { postAndPoll(cmd); }
 	});
 

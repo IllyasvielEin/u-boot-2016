@@ -1033,32 +1033,53 @@ static void httpd_handle_btn_detect(struct failsafe_httpd_state *hs) {
 	httpd_send_static(hs, resp, len);
 }
 
+/*
+ * POST /env_set, body "name=value" (only reset_key and config_name).
+ * Replies "ok" only when both setenv and saveenv succeeded.  "error" means
+ * the request was rejected or setenv failed, nothing was saved.
+ * "save_failed" means RAM was changed but saving failed: persistence is
+ * not confirmed and neither the old RAM nor the old flash content was
+ * restored.
+ */
 static void httpd_handle_env_set(struct failsafe_httpd_state *hs, char *data, int data_len) {
 	static char resp[128];
-	int len, ok = 0;
+	const char *result = "error";
+	int len;
 	char *body = strstr(data, "\r\n\r\n");
 	if (body) {
 		body += 4;
 		char *amp = strchr(body, '&');
+		char *end = amp ? amp : body + strlen(body);
 		char name[64] = "", value[128] = "";
 		char *eq = strchr(body, '=');
-		if (eq && eq < (amp ? amp : body + strlen(body))) {
+		if (eq && eq < end &&
+		    (size_t)(eq - body) < sizeof(name) &&
+		    (size_t)(end - eq - 1) < sizeof(value)) {
 			memcpy(name, body, eq - body);
 			name[eq - body] = '\0';
-			if (amp)
-				memcpy(value, eq + 1, amp - eq - 1);
-			else
-				strcpy(value, eq + 1);
+			memcpy(value, eq + 1, end - eq - 1);
+			value[end - eq - 1] = '\0';
 			if (strcmp(name, "reset_key") == 0 || strcmp(name, "config_name") == 0) {
-				setenv(name, value[0] ? value : NULL);
-				saveenv();
-				if (strcmp(name, "reset_key") == 0)
-					env_reset_gpio_invalidate();
-				ok = 1;
+				if (setenv(name, value[0] ? value : NULL)) {
+					printf("env_set: setting %s failed, not saved\n", name);
+				} else {
+					/*
+					 * RAM has changed: the cached reset GPIO
+					 * follows it even if saving fails below.
+					 */
+					if (strcmp(name, "reset_key") == 0)
+						env_reset_gpio_invalidate();
+					if (saveenv()) {
+						printf("env_set: %s changed in RAM, saving failed\n", name);
+						result = "save_failed";
+					} else {
+						result = "ok";
+					}
+				}
 			}
 		}
 	}
-	len = sprintf(resp, "HTTP/1.0 200 OK\r\nCache-Control: no-cache\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", ok ? "ok" : "error");
+	len = sprintf(resp, "HTTP/1.0 200 OK\r\nCache-Control: no-cache\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", result);
 	httpd_send_static(hs, resp, len);
 }
 

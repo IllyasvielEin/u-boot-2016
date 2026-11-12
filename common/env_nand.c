@@ -121,38 +121,87 @@ int nand_env_init(void)
 	return 0;
 }
 
+#if defined(CMD_SAVEENV) || !defined(CONFIG_SPL_BUILD)
+/*
+ * Transfer the CONFIG_ENV_RANGE bytes of the environment format to or from
+ * the physical ENV area [offset, offset + span) of the ENV NAND device.
+ * The data is spread over the good erase blocks in order, each block holds
+ * min(remaining, erasesize) bytes from its start, known bad blocks are
+ * skipped.  Saving and loading use this same distribution.
+ *
+ * Every query and transfer stays inside the area (and the device).  A
+ * failing bad block query, a transfer error, a short or zero transfer or
+ * running out of good blocks fails.  A corrected read (-EUCLEAN) of the
+ * full length is accepted; callers that need it compare the content.
+ *
+ * Returns 0 on success, 1 on failure.
+ */
+static int env_nand_xfer(loff_t offset, loff_t span, u_char *buf, int write)
+{
+	nand_info_t *nand = &nand_info[nand_env_device];
+	size_t total = CONFIG_ENV_RANGE;
+	size_t done = 0, len, req;
+	loff_t end, blocksize = nand->erasesize;
+	int ret;
+
+	if (!blocksize || (blocksize & (blocksize - 1)) || !total ||
+	    total > CONFIG_ENV_SIZE || offset < 0 || span <= 0 ||
+	    (offset & (blocksize - 1)) || nand->size <= 0 ||
+	    offset >= nand->size || span > nand->size - offset) {
+		puts("Invalid NAND environment area\n");
+		return 1;
+	}
+	end = offset + span;
+
+	while (done < total) {
+		if (offset >= end || blocksize > end - offset) {
+			puts("No good block left in the environment area\n");
+			return 1;
+		}
+
+		ret = nand_block_isbad(nand, offset);
+		if (ret < 0) {
+			printf("Bad block query at 0x%08llx failed %d\n",
+			       (unsigned long long)offset, ret);
+			return 1;
+		}
+		if (ret) {
+			offset += blocksize;
+			continue;
+		}
+
+		len = min(total - done, (size_t)blocksize);
+		req = len;
+		if (write) {
+			ret = nand_write(nand, offset, &len, &buf[done]);
+		} else {
+			ret = nand_read(nand, offset, &len, &buf[done]);
+			if (ret == -EUCLEAN)
+				ret = 0;
+		}
+		if (ret || len != req) {
+			printf("NAND %s at 0x%08llx failed %d (0x%zx of 0x%zx)\n",
+			       write ? "write" : "read",
+			       (unsigned long long)offset, ret, len, req);
+			return 1;
+		}
+
+		done += len;
+		offset += blocksize;
+	}
+
+	return 0;
+}
+#endif
+
 #ifdef CMD_SAVEENV
 /*
  * The legacy NAND code saved the environment in the first NAND device i.e.,
  * nand_dev_desc + 0. This is also the behaviour using the new NAND code.
  */
-static int writeenv(size_t offset, u_char *buf)
+static int writeenv(loff_t offset, loff_t span, u_char *buf)
 {
-	size_t end = offset + board_env_size;
-	size_t amount_saved = 0;
-	size_t blocksize, len;
-	u_char *char_ptr;
-
-	blocksize = nand_info[nand_env_device].erasesize;
-	len = min(blocksize, (size_t)CONFIG_ENV_RANGE);
-
-	while (amount_saved < CONFIG_ENV_RANGE && offset < end) {
-		if (nand_block_isbad(&nand_info[nand_env_device], offset)) {
-			offset += blocksize;
-		} else {
-			char_ptr = &buf[amount_saved];
-			if (nand_write(&nand_info[nand_env_device],
-				       offset, &len, char_ptr))
-				return 1;
-
-			offset += blocksize;
-			amount_saved += len;
-		}
-	}
-	if (amount_saved != CONFIG_ENV_RANGE)
-		return 1;
-
-	return 0;
+	return env_nand_xfer(offset, span, buf, 1);
 }
 
 struct env_location {
@@ -160,17 +209,60 @@ struct env_location {
 	nand_erase_options_t erase_opts;
 };
 
+/*
+ * Check the whole area that is going to be erased before erasing anything,
+ * write the exported environment and read it back into a separate buffer
+ * the same way it is loaded.  Success (and "OK") only after the complete
+ * format range including the CRC compares equal.  There is a single copy:
+ * a failure after the erase leaves the area partially written.
+ */
 static int erase_and_write_env(const struct env_location *location,
-		u_char *env_new)
+		u_char *env_new, u_char *env_check)
 {
-	int ret = 0;
+	nand_info_t *nand = &nand_info[nand_env_device];
+	const nand_erase_options_t *opts = &location->erase_opts;
+	loff_t blocksize = nand->erasesize, span = opts->length, padding;
+	int ret;
+
+	/* The physical area is a limit, never a length to round up. */
+	if (!blocksize || (blocksize & (blocksize - 1)) ||
+	    board_env_size <= 0 || (board_env_size & (blocksize - 1)) ||
+	    span <= 0 || span > board_env_size) {
+		puts("Invalid physical NAND environment area, nothing erased\n");
+		return 1;
+	}
+	/* A redundant copy's format-sized erase must fit its physical area. */
+	padding = span & (blocksize - 1);
+	if (padding) {
+		padding = blocksize - padding;
+		if (padding > board_env_size - span) {
+			puts("NAND environment erase exceeds its area, nothing erased\n");
+			return 1;
+		}
+		span += padding;
+	}
+
+	ret = nand_check_range_capacity(nand, opts->offset, span,
+					CONFIG_ENV_RANGE);
+	if (ret) {
+		printf("Error: %s environment area check failed (%d), "
+		       "nothing erased\n", location->name, ret);
+		return 1;
+	}
 
 	printf("Erasing %s...\n", location->name);
-	if (nand_erase_opts(&nand_info[nand_env_device], &location->erase_opts))
+	if (nand_erase_opts(nand, opts))
 		return 1;
 
 	printf("Writing to %s... ", location->name);
-	ret = writeenv(location->erase_opts.offset, env_new);
+	ret = writeenv(opts->offset, span, env_new);
+	if (!ret) {
+		ret = env_nand_xfer(opts->offset, span, env_check, 0);
+		if (!ret && memcmp(env_new, env_check, CONFIG_ENV_RANGE)) {
+			puts("read back mismatch ");
+			ret = 1;
+		}
+	}
 	puts(ret ? "FAILED!\n" : "OK\n");
 
 	return ret;
@@ -203,19 +295,30 @@ int nand_saveenv(void)
 #endif
 	};
 
-	env_t *env_new = (env_t *)memalign(ARCH_DMA_MINALIGN, CONFIG_ENV_SIZE);
+	env_t *env_new;
+	u_char *env_check;
+
+	if (!CONFIG_ENV_RANGE || CONFIG_ENV_RANGE > board_env_size ||
+	    CONFIG_ENV_RANGE > CONFIG_ENV_SIZE)
+		return 1;
+
+	/* All buffers are allocated before anything is erased. */
+	env_new = (env_t *)memalign(ARCH_DMA_MINALIGN, CONFIG_ENV_SIZE);
 	if (!env_new) {
 		printf("Error: Cannot allocate %d bytes\n", CONFIG_ENV_SIZE);
 		return 1;
 	}
 
-	if (CONFIG_ENV_RANGE > board_env_size) {
+	env_check = (u_char *)memalign(ARCH_DMA_MINALIGN, CONFIG_ENV_SIZE);
+	if (!env_check) {
+		printf("Error: Cannot allocate %d bytes\n", CONFIG_ENV_SIZE);
 		free(env_new);
 		return 1;
 	}
 
 	ret = env_export(env_new);
 	if (ret) {
+		free(env_check);
 		free(env_new);
 		return ret;
 	}
@@ -224,21 +327,25 @@ int nand_saveenv(void)
 	env_new->flags = ++env_flags; /* increase the serial */
 	env_idx = (gd->env_valid == 1);
 #endif
-	ret = erase_and_write_env(&location[env_idx], (u_char *)env_new);
+	ret = erase_and_write_env(&location[env_idx], (u_char *)env_new,
+				  env_check);
 #ifdef CONFIG_ENV_OFFSET_REDUND
 	if (!ret) {
 		/* preset other copy for next write */
 		gd->env_valid = gd->env_valid == 2 ? 1 : 2;
+		free(env_check);
 		free(env_new);
 		return ret;
 	}
 
 	env_idx = (env_idx + 1) & 1;
-	ret = erase_and_write_env(&location[env_idx], (u_char *)env_new);
+	ret = erase_and_write_env(&location[env_idx], (u_char *)env_new,
+				  env_check);
 	if (!ret)
 		printf("Warning: primary env write failed,"
 				" redundancy is lost!\n");
 #endif
+	free(env_check);
 	free(env_new);
 	return ret;
 }
@@ -252,36 +359,7 @@ static int readenv(size_t offset, u_char *buf)
 #else
 static int readenv(size_t offset, u_char *buf)
 {
-	size_t end = offset + board_env_size;
-	size_t amount_loaded = 0;
-	size_t blocksize, len;
-	u_char *char_ptr;
-
-	blocksize = nand_info[nand_env_device].erasesize;
-	if (!blocksize)
-		return 1;
-
-	len = min(blocksize, (size_t)CONFIG_ENV_RANGE);
-
-	while (amount_loaded < CONFIG_ENV_RANGE && offset < end) {
-		if (nand_block_isbad(&nand_info[nand_env_device], offset)) {
-			offset += blocksize;
-		} else {
-			char_ptr = &buf[amount_loaded];
-			if (nand_read_skip_bad(&nand_info[nand_env_device], offset,
-					       &len, NULL,
-					       nand_info[nand_env_device].size, char_ptr))
-				return 1;
-
-			offset += blocksize;
-			amount_loaded += len;
-		}
-	}
-
-	if (amount_loaded != CONFIG_ENV_RANGE)
-		return 1;
-
-	return 0;
+	return env_nand_xfer(offset, board_env_size, buf, 0);
 }
 #endif /* #if defined(CONFIG_SPL_BUILD) */
 

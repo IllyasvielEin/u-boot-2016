@@ -245,6 +245,9 @@ static int _do_env_set(int flag, int argc, char * const argv[], int env_flag)
 	/* Delete only ? */
 	if (argc < 3 || argv[2] == NULL) {
 		int rc = hdelete_r(name, &env_htab, env_flag);
+		if (!rc)
+			printf("## Error: failed to delete environment variable \"%s\"\n",
+			       name);
 		return !rc;
 	}
 

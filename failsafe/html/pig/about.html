@@ -148,6 +148,30 @@
 		});
 	}
 
+	// /env_set 只有回复 "ok" 才表示设置和保存都成功；其余情况持久化未确认。
+	// 之后重新加载只反映设备内存中的当前值，不能证明已保存。
+	var ENV_SET_MSG = {
+		save_failed: '已修改内存中的变量，但保存到闪存失败：持久化未确认。\n旧的内存值和闪存内容均未恢复，重新加载显示的是当前内存值。',
+		error: '设置失败或请求被拒绝，未保存：持久化未确认。',
+		network: '请求失败或无响应：设备是否已修改、是否已保存均未知，持久化未确认。'
+	};
+	function envSet(body) {
+		var xhr = new XMLHttpRequest(), done = false;
+		function finish(r) {
+			if (done) return;
+			done = true;
+			if (r !== 'ok')
+				alert(r === null ? ENV_SET_MSG.network :
+				      r === 'save_failed' ? ENV_SET_MSG.save_failed : ENV_SET_MSG.error);
+			loadAbout();
+		}
+		xhr.open('POST', '/env_set', true);
+		xhr.timeout = 10000;
+		xhr.onload = function() { finish(xhr.status === 200 ? xhr.responseText : null); };
+		xhr.onerror = xhr.ontimeout = xhr.onabort = function() { finish(null); };
+		xhr.send(body);
+	}
+
 	var infoFields = [
 		['机型', 'model'],
 		['配置名称', 'config_name'],
@@ -192,12 +216,12 @@
 				if (key === 'config_name' && data.config_name_source) {
 					td.className = 'about-gpio-ops';
 					if (data.config_name_source === 'env') {
-						addBtn(td, '恢复').onclick = function() { xhrPost('/env_set', 'config_name=', function() { loadAbout(); }); };
+						addBtn(td, '恢复').onclick = function() { envSet('config_name='); };
 					} else if (data.config_name_source === 'fdt') {
 						addBtn(td, '修改').onclick = function() {
 							var v = prompt('输入 config_name 值 (如 config@xxx):');
 							if (v !== null && v !== '')
-								xhrPost('/env_set', 'config_name=' + encodeURIComponent(v), function() { loadAbout(); });
+								envSet('config_name=' + encodeURIComponent(v));
 						};
 					}
 				}
@@ -239,7 +263,7 @@
 			gpioTbody.querySelectorAll('[data-override]').forEach(function(btn) {
 				btn.onclick = function() {
 					var key = this.getAttribute('data-override');
-					xhrPost('/env_set', encodeURIComponent(key) + '=', function() { loadAbout(); });
+					envSet(encodeURIComponent(key) + '=');
 				};
 			});
 			gpioTbody.querySelectorAll('[data-modify]').forEach(function(btn) {
@@ -247,7 +271,7 @@
 					var key = this.getAttribute('data-modify'),
 					    val = prompt('输入 ' + key + ' 的 GPIO 编号:');
 					if (val !== null && val !== '')
-						xhrPost('/env_set', encodeURIComponent(key) + '=' + encodeURIComponent(val), function() { loadAbout(); });
+						envSet(encodeURIComponent(key) + '=' + encodeURIComponent(val));
 				};
 			});
 			var detectBtn = document.getElementById('gpio-detect-btn');
