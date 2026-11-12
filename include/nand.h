@@ -121,6 +121,8 @@ int nand_read_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
 int nand_write_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
 			size_t *actual, loff_t lim, u_char *buffer, int flags);
 int nand_erase_opts(nand_info_t *meminfo, const nand_erase_options_t *opts);
+int nand_check_range_capacity(nand_info_t *nand, loff_t offset,
+			      loff_t range, size_t length);
 int nand_torture(nand_info_t *nand, loff_t offset);
 int nand_verify_page_oob(nand_info_t *nand, struct mtd_oob_ops *ops,
 			loff_t ofs);

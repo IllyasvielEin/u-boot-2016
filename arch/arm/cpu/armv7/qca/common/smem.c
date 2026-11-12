@@ -1084,25 +1084,34 @@ int getpart_offset_size(char *part_name, uint32_t *offset, uint32_t *size)
 
 	for (i = 0; i < smem_ptable.len; i++) {
 		struct smem_ptn *p = &smem_ptable.parts[i];
-		loff_t psize;
+		uint64_t psize, pstart;
 		if (!strncmp(p->name, part_name, SMEM_PTN_NAME_MAX)) {
 			bsize = get_part_block_size(p, sfi);
+			pstart = (uint64_t)p->start * bsize;
+			/* Validate before narrowing the physical range to 32 bits. */
+			if (!bsize || pstart > (uint32_t)~0U)
+				return -EINVAL;
 			if (p->size == (~0u)) {
 				/*
 				 * Partition size is 'till end of device', calculate
 				 * appropriately
 				 */
 #ifdef CONFIG_CMD_NAND
+				if (pstart >= nand_info[get_device_id_by_part(p)].size)
+					return -EINVAL;
 				psize = nand_info[get_device_id_by_part(p)].size
-					- (((loff_t)p->start) * bsize);
+					- pstart;
 #else
 				psize = 0;
 #endif
 			} else {
-				psize = ((loff_t)p->size) * bsize;
+				psize = (uint64_t)p->size * bsize;
 			}
 
-		*offset = ((loff_t)p->start) * bsize;
+		if (!psize || psize > (uint32_t)~0U)
+			return -EINVAL;
+
+		*offset = pstart;
 		*size = psize;
 		break;
 		}

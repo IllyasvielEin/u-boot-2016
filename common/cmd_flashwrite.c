@@ -85,19 +85,83 @@ uint32_t part_size, uint32_t file_size, char *layout)
 	if (((flash_type == SMEM_BOOT_NAND_FLASH) ||
 		(flash_type == SMEM_BOOT_QSPI_NAND_FLASH))) {
 
-		snprintf(runcmd, sizeof(runcmd), "nand device %d && ", nand_dev);
+#ifdef CONFIG_CMD_NAND
+		nand_info_t *nand;
+		nand_erase_options_t opts;
+		size_t len = file_size;
+		uint32_t padding;
+		int ret;
+
+		/* Device and layout selection, as before (hooks, IPQ806X). */
+		snprintf(runcmd, sizeof(runcmd), "nand device %d", nand_dev);
 
 		if (strcmp(layout, "default") != 0) {
 
-			snprintf(runcmd + strlen(runcmd), sizeof(runcmd),
-						"ipq_nand %s && ", layout);
+			snprintf(runcmd + strlen(runcmd),
+				 sizeof(runcmd) - strlen(runcmd),
+				 " && ipq_nand %s", layout);
 		}
 
-		snprintf(runcmd + strlen(runcmd), sizeof(runcmd),
-			"nand erase 0x%x 0x%x && "
-			"nand write 0x%x 0x%x 0x%x && ",
-			offset, part_size,
-			address, offset, file_size);
+		if (run_command(runcmd, 0) != CMD_RET_SUCCESS)
+			return CMD_RET_FAILURE;
+
+		/* Use the geometry valid after a layout switch. */
+		if (nand_curr_device < 0 ||
+		    nand_curr_device >= CONFIG_SYS_MAX_NAND_DEVICE ||
+		    !nand_info[nand_curr_device].name) {
+			puts("no NAND device available\n");
+			return CMD_RET_FAILURE;
+		}
+		nand = &nand_info[nand_curr_device];
+
+		/* Round only after selecting the actual NAND device/layout. */
+		if (!nand->writesize)
+			return CMD_RET_FAILURE;
+		padding = file_size % nand->writesize;
+		if (padding) {
+			padding = nand->writesize - padding;
+			if (file_size > (uint32_t)~0U - padding) {
+				puts("NAND payload size overflow\n");
+				return CMD_RET_FAILURE;
+			}
+			file_size += padding;
+		}
+		len = file_size;
+
+		/*
+		 * The partition is the hard limit for the scan, erase and
+		 * write; check the good capacity of the whole range that
+		 * is going to be erased before touching it.
+		 */
+		if (nand_check_range_capacity(nand, offset, part_size,
+					      file_size))
+			return CMD_RET_FAILURE;
+
+		memset(&opts, 0, sizeof(opts));
+		opts.offset = offset;
+		opts.length = part_size;
+		opts.lim = part_size;
+		opts.spread = 0;
+		printf("NAND erase: offset 0x%x, size 0x%x\n",
+		       offset, part_size);
+		ret = nand_erase_opts(nand, &opts);
+		if (ret) {
+			puts("NAND erase failed, not writing\n");
+			return CMD_RET_FAILURE;
+		}
+
+		ret = nand_write_skip_bad(nand, offset, &len, NULL, part_size,
+					  (u_char *)(uintptr_t)address,
+					  WITH_WR_VERIFY);
+		printf("NAND write: %zu bytes written: %s\n", len,
+		       (ret || len != file_size) ? "ERROR" : "OK");
+		if (ret || len != file_size)
+			return CMD_RET_FAILURE;
+
+		return CMD_RET_SUCCESS;
+#else
+		return CMD_RET_FAILURE;
+#endif
 
 	} else if (flash_type == SMEM_BOOT_MMC_FLASH) {
 
@@ -384,7 +448,7 @@ char * const argv[])
 	uint32_t offset, part_size, adj_size;
 	uint32_t load_addr = 0;
 	uint32_t file_size = 0;
-	uint32_t size_block, start_block, file_size_cpy = 0;
+	uint32_t file_size_cpy = 0;
 	char *part_name = NULL, *filesize, *loadaddr;
 	int flash_type, ret;
 	unsigned int active_part = 0;
@@ -405,18 +469,12 @@ char * const argv[])
 	ret = CMD_RET_USAGE;
 
 #ifdef CONFIG_QCA_MMC
+	uint32_t size_block, start_block;
 	block_dev_desc_t *blk_dev;
 #endif
 	disk_partition_t disk_info = {0};
 	qca_smem_flash_info_t *sfi = &qca_smem_flash_info;
 	flash_type = (flash_type_new != -1) ? flash_type_new : sfi->flash_type;
-#ifdef CONFIG_CMD_NAND
-#ifdef CONFIG_IPQ40XX
-	nand_info_t *nand = &nand_info[is_spi_nand_available()];
-#else
-	nand_info_t *nand = &nand_info[CONFIG_NAND_FLASH_INFO_IDX];
-#endif
-#endif
 	if (strcmp(argv[0], "flash") == 0)
 		flash_cmd = 1;
 
@@ -456,18 +514,16 @@ char * const argv[])
 	if (((flash_type == SMEM_BOOT_NAND_FLASH) ||
 		(flash_type == SMEM_BOOT_QSPI_NAND_FLASH))) {
 
-		ret = smem_getpart(part_name, &start_block, &size_block);
+		ret = getpart_offset_size(part_name, &offset, &part_size);
 		if (ret) {
 #ifdef IPQ_UBI_VOL_WRITE_SUPPORT
-			if (ubi_vol_present(part_name))
+			if (ret == -ENOENT && ubi_vol_present(part_name))
 				ret = write_ubi_vol(part_name, load_addr,
 								file_size);
 #endif
 			goto exit;
 		}
 
-		offset = sfi->flash_block_size * start_block;
-		part_size = sfi->flash_block_size * size_block;
 #ifdef CONFIG_IPQ806X
 		len = sizeof(layout_linux)/sizeof(layout_linux[0]);
 
@@ -605,19 +661,16 @@ char * const argv[])
 #endif
 #endif
 		} else {
-			ret = smem_getpart(part_name, &start_block,
-							&size_block);
+			ret = getpart_offset_size(part_name, &offset, &part_size);
 			if (ret) {
 #ifdef IPQ_UBI_VOL_WRITE_SUPPORT
-				if (ubi_vol_present(part_name))
+				if (ret == -ENOENT && ubi_vol_present(part_name))
 					ret = write_ubi_vol(part_name,
 						load_addr, file_size);
 #endif
 				goto exit;
 			}
 
-			offset = sfi->flash_block_size * start_block;
-			part_size = sfi->flash_block_size * size_block;
 
 #ifdef CONFIG_IPQ_JFFS2_CLEANMARKER
 			if (!strncmp(part_name, "rootfs", sizeof("rootfs")))
@@ -627,17 +680,6 @@ char * const argv[])
 	}
 
 	if (flash_cmd) {
-#ifdef CONFIG_CMD_NAND
-		if (((flash_type == SMEM_BOOT_NAND_FLASH) ||
-			(flash_type == SMEM_BOOT_QSPI_NAND_FLASH))) {
-
-			if (nand->writesize) {
-				adj_size = file_size % nand->writesize;
-				if (adj_size)
-					file_size = file_size + (nand->writesize - adj_size);
-			}
-		}
-#endif
 		if (flash_type == SMEM_BOOT_MMC_FLASH) {
 
 			if (disk_info.blksz) {

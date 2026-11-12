@@ -129,11 +129,16 @@ int nand_erase_opts(nand_info_t *meminfo, const nand_erase_options_t *opts)
 
 		erased_length++;
 
+		/*
+		 * A real erase or cleanmarker failure is reported to the
+		 * caller; even if the driver marked the block bad, the
+		 * requested range was not erased as asked.
+		 */
 		result = mtd_erase(meminfo, &erase);
 		if (result != 0) {
 			printf("\n%s: MTD Erase failure: %d\n",
 			       mtd_device, result);
-			continue;
+			return result < 0 ? result : -EIO;
 		}
 
 		/* format for JFFS2 ? */
@@ -151,7 +156,7 @@ int nand_erase_opts(nand_info_t *meminfo, const nand_erase_options_t *opts)
 			if (result != 0) {
 				printf("\n%s: MTD writeoob failure: %d\n",
 				       mtd_device, result);
-				continue;
+				return result < 0 ? result : -EIO;
 			}
 		}
 
@@ -399,32 +404,55 @@ int nand_unlock(struct mtd_info *mtd, loff_t start, size_t length,
  * Check if there are any bad blocks, and whether length including bad
  * blocks fits into device
  *
+ * The scan never queries a block that starts at or beyond the device end
+ * or @lim bytes from the start offset.  A failing bad block query is an
+ * error, not a bad block.
+ *
  * @param nand NAND device
  * @param offset offset in flash
  * @param length image length
  * @param used length of flash needed for the requested length
+ * @param lim maximum physical span from offset
+ * @param op "read" or "write", for messages
  * @return 0 if the image fits and there are no bad blocks
  *         1 if the image fits, but there are bad blocks
- *        -1 if the image does not fit
+ *        -EINVAL if the image does not fit into the device
+ *        -EFBIG if the image does not fit into lim
+ *        other negative value if a bad block query failed
  */
 static int check_skip_len(nand_info_t *nand, loff_t offset, size_t length,
-		size_t *used)
+		size_t *used, loff_t lim, const char *op)
 {
 	size_t len_excl_bad = 0;
+	loff_t start = offset;
 	int ret = 0;
 
 	while (len_excl_bad < length) {
 		size_t block_len, block_off;
 		loff_t block_start;
+		int bad;
 
-		if (offset >= nand->size)
-			return -1;
+		if (offset >= nand->size) {
+			printf("Attempt to %s outside the flash area\n", op);
+			return -EINVAL;
+		}
+		if (offset - start >= lim) {
+			printf("Size of %s exceeds partition or device limit\n",
+			       op);
+			return -EFBIG;
+		}
 
 		block_start = offset & ~(loff_t)(nand->erasesize - 1);
 		block_off = offset & (nand->erasesize - 1);
 		block_len = nand->erasesize - block_off;
 
-		if (!nand_block_isbad(nand, block_start))
+		bad = nand_block_isbad(nand, block_start);
+		if (bad < 0) {
+			printf("Bad block query at 0x%08llx failed %d\n",
+			       block_start, bad);
+			return bad;
+		}
+		if (!bad)
 			len_excl_bad += block_len;
 		else
 			ret = 1;
@@ -437,7 +465,83 @@ static int check_skip_len(nand_info_t *nand, loff_t offset, size_t length,
 	if (len_excl_bad > length)
 		*used -= (len_excl_bad - length);
 
+	if (*used > lim) {
+		printf("Size of %s exceeds partition or device limit\n", op);
+		return -EFBIG;
+	}
+
 	return ret;
+}
+
+/**
+ * nand_check_range_capacity:
+ *
+ * Check, before erasing, that the erase-block aligned range
+ * [offset, offset + range) holds at least length bytes of good blocks.
+ * Every block of the range is queried, even after enough capacity has
+ * been found, because the whole range is going to be erased.  No block
+ * outside the range is queried.  Known bad blocks are allowed; a failing
+ * bad block query is an error.
+ *
+ * @param nand		NAND device
+ * @param offset	erase-block aligned start of the range
+ * @param range		erase-block aligned size of the range
+ * @param length	non-zero, page aligned payload size
+ * @return 0 if the payload fits, -EINVAL for invalid geometry or range,
+ *	   -EFBIG if the good capacity is too small, or the failing query
+ *	   result
+ */
+int nand_check_range_capacity(nand_info_t *nand, loff_t offset,
+			      loff_t range, size_t length)
+{
+	uint64_t good = 0;
+	loff_t pos;
+	int bad, failed = 0;
+
+	if (!nand || !nand->erasesize || !nand->writesize ||
+	    (nand->erasesize & (nand->erasesize - 1)) ||
+	    (nand->writesize & (nand->writesize - 1)) ||
+	    nand->size <= 0) {
+		puts("Invalid NAND geometry\n");
+		return -EINVAL;
+	}
+
+	if (offset < 0 || range <= 0 || offset >= nand->size ||
+	    range > nand->size - offset ||
+	    (offset & (nand->erasesize - 1)) ||
+	    (range & (nand->erasesize - 1))) {
+		puts("Invalid NAND range\n");
+		return -EINVAL;
+	}
+
+	if (!length || (length & (nand->writesize - 1)) ||
+	    (uint64_t)length > (uint64_t)range) {
+		puts("Invalid NAND payload length\n");
+		return -EINVAL;
+	}
+
+	for (pos = 0; pos < range; pos += nand->erasesize) {
+		WATCHDOG_RESET();
+
+		bad = nand_block_isbad(nand, offset + pos);
+		if (bad < 0) {
+			printf("Bad block query at 0x%08llx failed %d\n",
+			       offset + pos, bad);
+			return bad;
+		}
+		if (bad)
+			failed++;
+		else
+			good += nand->erasesize;
+	}
+
+	if (good < length) {
+		printf("Not enough good blocks: need 0x%zx, have 0x%llx (%d bad)\n",
+		       length, (unsigned long long)good, failed);
+		return -EFBIG;
+	}
+
+	return 0;
 }
 
 #ifdef CONFIG_CMD_NAND_TRIMFFS
@@ -529,9 +633,14 @@ int nand_verify(nand_info_t *nand, loff_t ofs, size_t len, u_char *buf)
 	/* Read the NAND back in page-size groups to limit malloc size */
 	for (verofs = ofs; verofs < ofs + len;
 	     verofs += verlen, buf += verlen) {
+		size_t req;
+
 		verlen = min(nand->writesize, (uint32_t)(ofs + len - verofs));
+		req = verlen;
 		rval = nand_read(nand, verofs, &verlen, verbuf);
-		if (!rval || (rval == -EUCLEAN))
+		if ((!rval || (rval == -EUCLEAN)) && verlen != req)
+			rval = -EIO;	/* short read */
+		else if (!rval || (rval == -EUCLEAN))
 			rval = memcmp(buf, verbuf, verlen);
 
 		if (rval)
@@ -556,13 +665,16 @@ int nand_verify(nand_info_t *nand, loff_t ofs, size_t len, u_char *buf)
  * extend beyond the end of the NAND device, both length and actual (if
  * not NULL) are set to 0.  In the case where the write would extend
  * beyond the limit we are passed, length is set to 0 and actual is set
- * to the required length.
+ * to the span scanned before the limit stopped the scan.  The limit also
+ * bounds every block query, skip and write performed afterwards, so a
+ * block that turns bad after the scan cannot push data past it.  A
+ * failing bad block query or a short write is an error.
  *
  * @param nand  	NAND device
  * @param offset	offset in flash
  * @param length	buffer length
- * @param actual	set to size required to write length worth of
- *			buffer or 0 on error, if not NULL
+ * @param actual	physical span scanned, if not NULL; on failure this
+ *			may be partial and is not the full required capacity
  * @param lim		maximum size that actual may be in order to not
  *			exceed the buffer
  * @param buffer        buffer to read from
@@ -573,6 +685,7 @@ int nand_write_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
 		size_t *actual, loff_t lim, u_char *buffer, int flags)
 {
 	int rval = 0, blocksize;
+	loff_t start = offset;
 	size_t left_to_write = *length;
 	size_t used_for_write = 0;
 	u_char *p_buffer = buffer;
@@ -600,25 +713,23 @@ int nand_write_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
 		return -EINVAL;
 	}
 
-	need_skip = check_skip_len(nand, offset, *length, &used_for_write);
+	need_skip = check_skip_len(nand, offset, *length, &used_for_write,
+				   lim, "write");
 
 	if (actual)
 		*actual = used_for_write;
 
 	if (need_skip < 0) {
-		printf("Attempt to write outside the flash area\n");
 		*length = 0;
-		return -EINVAL;
-	}
-
-	if (used_for_write > lim) {
-		puts("Size of write exceeds partition or device limit\n");
-		*length = 0;
-		return -EFBIG;
+		return need_skip;
 	}
 
 	if (!need_skip && !(flags & WITH_DROP_FFS)) {
+		size_t req = *length;
+
 		rval = nand_write(nand, offset, length, buffer);
+		if (!rval && *length != req)
+			rval = -EIO;	/* short write */
 
 		if ((flags & WITH_WR_VERIFY) && !rval)
 			rval = nand_verify(nand, offset, *length, buffer);
@@ -634,13 +745,32 @@ int nand_write_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
 
 	while (left_to_write > 0) {
 		size_t block_offset = offset & (nand->erasesize - 1);
-		size_t write_size, truncated_write_size;
+		loff_t block_start = offset & ~(loff_t)(nand->erasesize - 1);
+		size_t write_size, truncated_write_size, req;
+		int bad;
 
 		WATCHDOG_RESET();
 
-		if (nand_block_isbad(nand, offset & ~(nand->erasesize - 1))) {
-			printf("Skip bad block 0x%08llx\n",
-				offset & ~(nand->erasesize - 1));
+		/*
+		 * Blocks may turn bad after the scan above (e.g. marked
+		 * by a failed erase), so the limit is enforced again for
+		 * every query, skip and write.
+		 */
+		if (offset >= nand->size || offset - start >= lim) {
+			puts("Size of write exceeds partition or device limit\n");
+			*length -= left_to_write;
+			return -EFBIG;
+		}
+
+		bad = nand_block_isbad(nand, block_start);
+		if (bad < 0) {
+			printf("Bad block query at 0x%08llx failed %d\n",
+			       block_start, bad);
+			*length -= left_to_write;
+			return bad;
+		}
+		if (bad) {
+			printf("Skip bad block 0x%08llx\n", block_start);
 			offset += nand->erasesize - block_offset;
 			continue;
 		}
@@ -650,6 +780,13 @@ int nand_write_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
 		else
 			write_size = blocksize - block_offset;
 
+		if (write_size > lim - (offset - start) ||
+		    write_size > nand->size - offset) {
+			puts("Size of write exceeds partition or device limit\n");
+			*length -= left_to_write;
+			return -EFBIG;
+		}
+
 		truncated_write_size = write_size;
 #ifdef CONFIG_CMD_NAND_TRIMFFS
 		if (flags & WITH_DROP_FFS)
@@ -657,8 +794,11 @@ int nand_write_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
 					&write_size);
 #endif
 
+		req = truncated_write_size;
 		rval = nand_write(nand, offset, &truncated_write_size,
 				p_buffer);
+		if (!rval && truncated_write_size != req)
+			rval = -EIO;	/* short write */
 
 		if ((flags & WITH_WR_VERIFY) && !rval)
 			rval = nand_verify(nand, offset,
@@ -691,13 +831,15 @@ int nand_write_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
  * beyond the end of the NAND device, both length and actual (if not
  * NULL) are set to 0.  In the case where the read would extend beyond
  * the limit we are passed, length is set to 0 and actual is set to the
- * required length.
+ * span scanned before the limit stopped the scan.  The limit also bounds
+ * every block query, skip and read; a failing bad block query or a short
+ * read is an error.
  *
  * @param nand NAND device
  * @param offset offset in flash
  * @param length buffer length, on return holds number of read bytes
- * @param actual set to size required to read length worth of buffer or 0
- * on error, if not NULL
+ * @param actual physical span scanned, if not NULL; on failure this may
+ * be partial and is not the full required capacity
  * @param lim maximum size that actual may be in order to not exceed the
  * buffer
  * @param buffer buffer to write to
@@ -707,6 +849,7 @@ int nand_read_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
 		size_t *actual, loff_t lim, u_char *buffer)
 {
 	int rval;
+	loff_t start = offset;
 	size_t left_to_read = *length;
 	size_t used_for_read = 0;
 	u_char *p_buffer = buffer;
@@ -720,25 +863,23 @@ int nand_read_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
 		return -EINVAL;
 	}
 
-	need_skip = check_skip_len(nand, offset, *length, &used_for_read);
+	need_skip = check_skip_len(nand, offset, *length, &used_for_read,
+				   lim, "read");
 
 	if (actual)
 		*actual = used_for_read;
 
 	if (need_skip < 0) {
-		printf("Attempt to read outside the flash area\n");
 		*length = 0;
-		return -EINVAL;
-	}
-
-	if (used_for_read > lim) {
-		puts("Size of read exceeds partition or device limit\n");
-		*length = 0;
-		return -EFBIG;
+		return need_skip;
 	}
 
 	if (!need_skip) {
+		size_t req = *length;
+
 		rval = nand_read(nand, offset, length, buffer);
+		if ((!rval || rval == -EUCLEAN) && *length != req)
+			rval = -EIO;	/* short read */
 		if (!rval || rval == -EUCLEAN)
 			return 0;
 
@@ -750,13 +891,27 @@ int nand_read_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
 
 	while (left_to_read > 0) {
 		size_t block_offset = offset & (nand->erasesize - 1);
-		size_t read_length;
+		loff_t block_start = offset & ~(loff_t)(nand->erasesize - 1);
+		size_t read_length, req;
+		int bad;
 
 		WATCHDOG_RESET();
 
-		if (nand_block_isbad(nand, offset & ~(nand->erasesize - 1))) {
-			printf("Skipping bad block 0x%08llx\n",
-				offset & ~(nand->erasesize - 1));
+		if (offset >= nand->size || offset - start >= lim) {
+			puts("Size of read exceeds partition or device limit\n");
+			*length -= left_to_read;
+			return -EFBIG;
+		}
+
+		bad = nand_block_isbad(nand, block_start);
+		if (bad < 0) {
+			printf("Bad block query at 0x%08llx failed %d\n",
+			       block_start, bad);
+			*length -= left_to_read;
+			return bad;
+		}
+		if (bad) {
+			printf("Skipping bad block 0x%08llx\n", block_start);
 			offset += nand->erasesize - block_offset;
 			continue;
 		}
@@ -766,7 +921,17 @@ int nand_read_skip_bad(nand_info_t *nand, loff_t offset, size_t *length,
 		else
 			read_length = nand->erasesize - block_offset;
 
+		if (read_length > lim - (offset - start) ||
+		    read_length > nand->size - offset) {
+			puts("Size of read exceeds partition or device limit\n");
+			*length -= left_to_read;
+			return -EFBIG;
+		}
+
+		req = read_length;
 		rval = nand_read(nand, offset, &read_length, p_buffer);
+		if ((!rval || rval == -EUCLEAN) && read_length != req)
+			rval = -EIO;	/* short read */
 		if (rval && rval != -EUCLEAN) {
 			printf("NAND read from offset %llx failed %d\n",
 				offset, rval);
