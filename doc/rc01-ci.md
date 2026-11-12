@@ -10,6 +10,8 @@ token 仅 `contents: read`，checkout 使用 `persist-credentials: false`。绿�
 - 单 job，`ubuntu-24.04` x86_64，60 分钟超时；同一 ref 的新运行取消旧运行。
 - Node `24.22.2`（setup-node）、uv `0.13.5`（setup-uv）、runner 自带 Python 3（`UV_PYTHON=python3`，
   禁止下载）；apt 只装构建/DTC 所需包，不装 npm minifier 或 zopfli。
+- uv 调用显式保留 setup-node 后的 PATH，避免 Python 目录中的系统 Node 覆盖固定版本；
+  上传前核对 manifest 实际 Node 版本与 `NODE_VERSION` 一致。
 - `RC01_CI_STRICT=1`：回归基线缺失或 sanitizer 编译失败即失败。
   `RC01_WEB_PROFILE=rename-gzip`：class rename + `gzip -9n`，不探测全局 minifier/zopfli。
 - `TZ=UTC`、`LC_ALL=C.UTF-8`、`SOURCE_DATE_EPOCH=` 本次 commit 时间。

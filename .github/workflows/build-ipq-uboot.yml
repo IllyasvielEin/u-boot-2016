@@ -78,7 +78,7 @@ jobs:
           {
             uname -m; . /etc/os-release; echo "$PRETTY_NAME"
             echo "runner-image ${ImageOS:-?} ${ImageVersion:-?}"
-            uv --version; uv run --offline --no-project python --version
+            uv --version; uv run --offline --no-project env PATH="$PATH" python3 --version
             node --version; cc --version | sed -n 1p; dtc --version; git --version
           } | tee "$OUT/logs/host-tools.txt"
           test "$(uname -m)" = x86_64
@@ -99,7 +99,7 @@ jobs:
           for t in test_nand_write_safety test_upgrade_results test_env_save \
                    test_ci_failures test_ci_candidate; do
             echo "::group::$t"
-            uv run --offline --no-project python -B "test/rc01/$t.py" 2>&1 | tee "$OUT/logs/$t.log"
+            uv run --offline --no-project env PATH="$PATH" python3 -B "test/rc01/$t.py" 2>&1 | tee "$OUT/logs/$t.log"
             echo "::endgroup::"
           done
 
@@ -121,7 +121,9 @@ jobs:
 
       - name: Check candidate
         run: |
-          uv run --offline --no-project python -B tools/ci/check_be10000_candidate.py \
+          # uv prepends the selected Python directory to PATH. Preserve the
+          # setup-node PATH so /usr/bin/node cannot replace the pinned Node.
+          uv run --offline --no-project env PATH="$PATH" python3 -B tools/ci/check_be10000_candidate.py \
             --tree . --mbn "$CANDIDATE" \
             --result "$OUT/check-result.json" --candidate-dir "$OUT/candidate" \
             --meta "source_sha=$(git rev-parse HEAD)" \
@@ -140,6 +142,12 @@ jobs:
             --meta "runner=ubuntu-24.04 ${ImageVersion:-?} $(uname -m)" \
             --meta "host_regressions=strict pass" \
             2>&1 | tee "$OUT/logs/check.log"
+          uv run --offline --no-project env PATH="$PATH" python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          manifest = json.loads((Path(os.environ["OUT"]) / "candidate/manifest.json").read_text())
+          assert manifest["tools"]["node"] == "v" + os.environ["NODE_VERSION"], manifest["tools"]
+          PY
           cd "$OUT/candidate" && sha256sum -c SHA256SUMS
 
       - name: Upload candidate
