@@ -171,6 +171,8 @@ def read_tree(path):
 def read_rev(rev, path):
     r = subprocess.run(["git", "-C", str(ROOT), "show", "%s:%s" % (rev, path)],
                        capture_output=True, text=True)
+    if r.returncode and os.environ.get("RC01_CI_STRICT") == "1":
+        raise SystemExit("required regression baseline unavailable: %s:%s" % (rev, path))
     return r.stdout if r.returncode == 0 else None
 
 
@@ -232,6 +234,9 @@ def build(work, name, code):
     r = subprocess.run(base[:1] + san + base[1:], capture_output=True,
                        text=True)
     if r.returncode != 0:
+        if os.environ.get("RC01_CI_STRICT") == "1":
+            sys.stderr.write(r.stderr)
+            raise SystemExit("sanitizer build failed: %s" % c)
         print("note: sanitizer build failed, building without sanitizers")
         r = subprocess.run(base, capture_output=True, text=True)
     if r.returncode != 0:

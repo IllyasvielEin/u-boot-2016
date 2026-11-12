@@ -1,199 +1,164 @@
-name: Build U-Boot for IPQ Devices
+# Read-only build verification for the Xiaomi BE10000 (ipq9574) U-Boot.
+#
+# One job: strict host regressions -> in-tree ./build.sh of the single
+# BE10000 defconfig with a pinned toolchain and the rename-gzip web
+# profile -> offline candidate check -> one Actions artifact holding the
+# MBN, manifest, SHA256SUMS and check result. No Release is created or
+# deleted here; a green run is a static build candidate, not a device
+# qualification. See doc/rc01-ci.md.
+
+name: BE10000 U-Boot candidate
 
 on:
   push:
-  # pull_request:
-  schedule:
-    - cron: '0 0 15 * *'
+    branches: [be10000-four-port]
+  pull_request:
   workflow_dispatch:
-    inputs:
-      ipq_type:
-        description: 'Please select the IPQ type(s) to build. for example: ipq6018,ipq807x,all = all types.'
-        required: true
-        default: 'all'
-        type: choice
-        options:
-          - all
-          - ipq40xx
-          - ipq5018
-          - ipq5332
-          - ipq6018
-          - ipq806x
-          - ipq807x
-          - ipq9574
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash    # bash -eo pipefail
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  be10000:
+    name: ipq9574_xiaomi_be10000
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
 
     env:
-      TZ: Asia/Shanghai
-      NODE_VERSION: '24'
-      SHOULD_RUN_STEP: "github.event_name != 'workflow_dispatch' || inputs.ipq_type == 'all' || inputs.ipq_type == matrix.ipq_type"
-      TOOLCHAIN: "https://github.com/1980490718/toolchain-arm_cortex-a7_gcc-5.2.0.git"
-      DEPENDENCIES: "build-essential libncurses5-dev gawk git gettext libssl-dev python3 wget cpio flex bison bc rsync zopfli device-tree-compiler"
-
-    strategy:
-      matrix:
-        ipq_type: ['ipq40xx', 'ipq5018', 'ipq5332', 'ipq6018', 'ipq806x', 'ipq807x', 'ipq9574']
-      fail-fast: false
-
-    if: github.event_name != 'workflow_dispatch' || inputs.ipq_type == 'all'
+      DEFCONFIG: ipq9574_xiaomi_be10000_defconfig
+      CANDIDATE: bin/openwrt-ipq9574_xiaomi_be10000-u-boot.mbn
+      TOOLCHAIN_REPO: https://github.com/1980490718/toolchain-arm_cortex-a7_gcc-5.2.0.git
+      TOOLCHAIN_COMMIT: 0daf0879219130c46812cd5029fbcc2940316b16
+      TOOLCHAIN_BIN: ../staging_dir/toolchain-arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi/bin
+      NODE_VERSION: 24.22.2
+      UV_VERSION: 0.13.5
+      UV_PYTHON: python3            # the runner's system Python 3, no download
+      UV_PYTHON_DOWNLOADS: never
+      RC01_CI_STRICT: '1'           # missing baseline / sanitizer fallback = failure
+      RC01_WEB_PROFILE: rename-gzip # class rename + gzip, no minifier/zopfli discovery
+      TZ: UTC
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      PYTHONDONTWRITEBYTECODE: '1'
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
+      - name: Checkout (full history for regression baselines)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Show current timezone and time
-        run: |
-          echo "Current timezone: $(timedatectl show -p Timezone --value)"
-          echo "Current time: $(date '+%Y-%m-%d %H:%M:%S %Z')"
-
-      - name: Setup Node.js 24
-        uses: actions/setup-node@v6.4.0
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Install build dependencies
+      - name: Setup uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install host packages
         run: |
+          echo "OUT=$RUNNER_TEMP/ci-out" >> "$GITHUB_ENV"
+          OUT=$RUNNER_TEMP/ci-out
           sudo apt-get update -qq
-          sudo apt-get install -y ${{ env.DEPENDENCIES }}
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libncurses-dev gawk gettext libssl-dev python3 \
+            cpio flex bison bc device-tree-compiler
+          mkdir -p "$OUT/logs"
+          {
+            uname -m; . /etc/os-release; echo "$PRETTY_NAME"
+            echo "runner-image ${ImageOS:-?} ${ImageVersion:-?}"
+            uv --version; uv run --offline --no-project python --version
+            node --version; cc --version | sed -n 1p; dtc --version; git --version
+          } | tee "$OUT/logs/host-tools.txt"
+          test "$(uname -m)" = x86_64
+          test "$(node --version)" = "v$NODE_VERSION"
 
-      - name: Install Node.js packages(minifier, css, js, terser, svgo) for Web interface compression
-        run: sudo npm install -g html-minifier-terser clean-css terser svgo
-
-      - name: Clone Toolchain to staging_dir
+      - name: Check regression baselines are reachable
         run: |
-          git clone --depth=1 ${{ env.TOOLCHAIN }} ../staging_dir
-          echo "Clone Toolchain to staging_dir"
-          ls -la ../staging_dir/
-          if [ -d "../staging_dir/toolchain-arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi/bin" ]; then
-            echo "Toolchain bin path verified"
-          else
-            echo "Warning: Expected path not found"
-            find ../staging_dir -name "*gcc*" | head -10
-          fi
-
-      - name: Build ${{ matrix.ipq_type }} U-Boot
-        if: |
-          ${{ env.SHOULD_RUN_STEP }}
-        run: ./build.sh ${{ matrix.ipq_type }}
-
-      - name: Upload compiled artifacts (bin directory)
-        if: |
-          ${{ env.SHOULD_RUN_STEP }}
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: u-boot-${{ matrix.ipq_type }}
-          path: bin/
-          retention-days: 30
-
-      - name: Show bin directory content
-        if: |
-          ${{ env.SHOULD_RUN_STEP }}
-        run: |
-          echo " ${{ matrix.ipq_type }} Build completed!"
-          ls -la bin/ || echo "bin directory is empty"
-
-  release:
-    name: Create Release
-    needs: build
-    if: success() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
-    env:
-      TZ: Asia/Shanghai
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install GitHub CLI and jq
-        run: |
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update
-          sudo apt-get install -y gh jq
-
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v8.0.1
-        with:
-          path: artifacts
-          pattern: u-boot-*
-          merge-multiple: true
-
-      - name: Confirm current timezone is Asia/Shanghai
-        run: |
-          echo "Current timezone: $(timedatectl show -p Timezone --value)"
-          echo "Current time: $(date '+%Y-%m-%d %H:%M:%S %Z')"
-
-      - name: Set TODAY and BUILD_TIME environment variables
-        run: |
-          echo "TODAY=$(date +%Y-%m-%d)" >> $GITHUB_ENV
-          echo "TODAY_ISO=$(date +%Y-%m-%d)" >> $GITHUB_ENV
-          echo "BUILD_TIME=$(date '+%H:%M:%S')" >> $GITHUB_ENV
-          echo "FULL_BUILD_TIME=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
-          echo "BRANCH_NAME=${GITHUB_REF#refs/heads/}" >> $GITHUB_ENV
-          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-          echo "BUILD_TIMESTAMP=$(date '+%Y%m%d-%H%M%S')" >> $GITHUB_ENV
-
-      - name: Rename artifacts with branch-date-time suffix
-        run: |
-          cd artifacts
-          SUFFIX="${{ env.BRANCH_NAME }}-${{ env.BUILD_TIMESTAMP }}"
-          for f in *.elf *.mbn; do
-            if [ -f "$f" ]; then
-              BASENAME="${f%.*}"
-              EXT="${f##*.}"
-              NEW_NAME="${BASENAME}-${SUFFIX}.${EXT}"
-              mv "$f" "$NEW_NAME"
-              echo "Renamed: $f -> $NEW_NAME"
-            fi
+          revs=$(grep -ho 'BASELINE_REV = "[0-9a-f]\{40\}"' test/rc01/test_*.py | cut -d'"' -f2 | sort -u)
+          test -n "$revs"
+          for rev in $revs; do
+            git cat-file -e "$rev^{commit}" || { echo "::error::baseline $rev not in checkout"; exit 1; }
           done
-          echo "Final artifact list:"
-          ls -la
+          echo "$revs" | paste -sd, - > "$OUT/baselines.txt"
+          cat "$OUT/baselines.txt"
 
-      - name: Check and delete all published content on Releases page
+      - name: Host regressions (strict)
         run: |
-          echo "Check Releases page today (${{ env.TODAY }}) for branch: ${{ env.BRANCH_NAME }}"
-          echo "Current time: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+          for t in test_nand_write_safety test_upgrade_results test_env_save \
+                   test_ci_failures test_ci_candidate; do
+            echo "::group::$t"
+            uv run --offline --no-project python -B "test/rc01/$t.py" 2>&1 | tee "$OUT/logs/$t.log"
+            echo "::endgroup::"
+          done
 
-          # View all releases for debugging
-          echo "All Releases list:"
-          gh release list --limit 10
+      - name: Fetch pinned toolchain
+        run: |
+          git init -q ../staging_dir
+          git -C ../staging_dir fetch -q --depth=1 "$TOOLCHAIN_REPO" "$TOOLCHAIN_COMMIT"
+          git -C ../staging_dir checkout -q --detach FETCH_HEAD
+          test "$(git -C ../staging_dir rev-parse HEAD)" = "$TOOLCHAIN_COMMIT"
+          "$TOOLCHAIN_BIN/arm-openwrt-linux-gcc" --version | sed -n 1p | tee "$OUT/gcc-version.txt"
+          "$TOOLCHAIN_BIN/arm-openwrt-linux-strip" --version | sed -n 1p
 
-          # Match by tag name directly (tag format: branch/vYYYY-MM-DD)
-          # This avoids timezone mismatch between Shanghai date and GitHub UTC createdAt
-          TAG_PREFIX="${{ env.BRANCH_NAME }}/v${{ env.TODAY }}"
-          echo "Looking for tag prefix: $TAG_PREFIX"
+      - name: Build ${{ env.DEFCONFIG }}
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          echo "$SOURCE_DATE_EPOCH" > "$OUT/source-date-epoch.txt"
+          ./build.sh "$DEFCONFIG" 2>&1 | tee "$OUT/logs/build.log"
+          test -s "$CANDIDATE"
 
-          RELEASE_JSON=$(gh release list --limit 100 --json tagName)
-          TODAY_TAGS=$(echo "$RELEASE_JSON" | jq -r --arg prefix "$TAG_PREFIX" '.[] | select(.tagName | startswith($prefix)) | .tagName')
-          echo "Matching tags: $TODAY_TAGS"
+      - name: Check candidate
+        run: |
+          uv run --offline --no-project python -B tools/ci/check_be10000_candidate.py \
+            --tree . --mbn "$CANDIDATE" \
+            --result "$OUT/check-result.json" --candidate-dir "$OUT/candidate" \
+            --meta "source_sha=$(git rev-parse HEAD)" \
+            --meta "ref=$GITHUB_REF" \
+            --meta "event=$GITHUB_EVENT_NAME" \
+            --meta "run=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+            --meta "public_four_port_base=54a2eb299d190abfabca58fe061bd7dcaa2e6c19" \
+            --meta "regression_baselines=$(cat "$OUT/baselines.txt")" \
+            --meta "defconfig=$DEFCONFIG" \
+            --meta "toolchain_repo=$TOOLCHAIN_REPO" \
+            --meta "toolchain_commit=$TOOLCHAIN_COMMIT" \
+            --meta "gcc=$(cat "$OUT/gcc-version.txt")" \
+            --meta "uv=$(uv --version)" \
+            --meta "web_profile=$RC01_WEB_PROFILE" \
+            --meta "source_date_epoch=$(cat "$OUT/source-date-epoch.txt")" \
+            --meta "runner=ubuntu-24.04 ${ImageVersion:-?} $(uname -m)" \
+            --meta "host_regressions=strict pass" \
+            2>&1 | tee "$OUT/logs/check.log"
+          cd "$OUT/candidate" && sha256sum -c SHA256SUMS
 
-          if [ -n "$TODAY_TAGS" ]; then
-            echo "Found published Releases today, deleting all..."
-            echo "$TODAY_TAGS"
-            echo "$TODAY_TAGS" | xargs -I {} gh release delete {} --yes --cleanup-tag
-            echo "All today's Releases deleted completed!"
-          else
-            echo "Releases page today is empty"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create new GitHub Release
-        uses: softprops/action-gh-release@v3.0.1
+      - name: Upload candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          tag_name: ${{ env.BRANCH_NAME }}/v${{ env.TODAY }}
-          name: ${{ env.BRANCH_NAME }}/v${{ env.TODAY }}
-          body: |
-            Branch：`${{ env.BRANCH_NAME }}`
-            Commit：`${{ env.SHORT_SHA }}`
-            Build Time：${{ env.FULL_BUILD_TIME }} ${{ env.TZ }}
-            Types：ipq40xx、ipq5018、ipq5332、ipq6018、ipq806x、ipq807x、ipq9574
-          files: artifacts/*
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: be10000-uboot-candidate-${{ github.sha }}
+          path: ${{ env.OUT }}/candidate/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics (failed run, not a candidate)
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: be10000-uboot-diagnostics-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.OUT }}/logs/
+            ${{ env.OUT }}/check-result.json
+            .config
+            u-boot.cfg
+          if-no-files-found: warn
+          retention-days: 7

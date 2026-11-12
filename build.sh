@@ -296,7 +296,11 @@ for DEFCONFIG in "${DEFCONFIGS[@]}"; do
 	echo "================================================"
 
 	# Clean previous build artifacts
-	make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE clean
+	if ! make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE clean; then
+		echo "Error: Clean failed for $DEFCONFIG"
+		BUILD_FAILED+=("$DEFCONFIG")
+		continue
+	fi
 
 	# Configure U-Boot
 	echo "Using config file: $DEFCONFIG"
@@ -307,7 +311,7 @@ for DEFCONFIG in "${DEFCONFIGS[@]}"; do
 	fi
 
 	# Compile U-Boot
-	JOBS=$(nproc 2>/dev/null || echo 1)
+	JOBS=${UBOOT_BUILD_JOBS:-$(nproc 2>/dev/null || echo 1)}
 	echo "Compiling (${JOBS} jobs)..."
 	if ! make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j${JOBS}; then
 		echo "Error: Compilation failed for $DEFCONFIG"
@@ -316,28 +320,31 @@ for DEFCONFIG in "${DEFCONFIGS[@]}"; do
 	fi
 
 	# Check if compilation was successful
-	if [ ! -f "u-boot" ]; then
+	if [ ! -s "u-boot" ]; then
 		echo "Error: u-boot file not generated for $DEFCONFIG"
 		BUILD_FAILED+=($DEFCONFIG)
 		continue
 	fi
 
 	# Handle different IPQ types
+PACK_FAILED=0
 case $IPQ_TYPE in
 	ipq40xx|ipq806x)
 		echo "IPQ type $IPQ_TYPE uses strip to generate elf file"
-		${CROSS_COMPILE}strip u-boot -o "bin/openwrt-${CONFIG_NAME}-u-boot.elf"
+		${CROSS_COMPILE}strip u-boot -o "bin/openwrt-${CONFIG_NAME}-u-boot.elf" || PACK_FAILED=1
 		OUTPUT_FILE="bin/openwrt-${CONFIG_NAME}-u-boot.elf"
 		;;
 	ipq5018|ipq807x)
 		echo "IPQ type $IPQ_TYPE uses MBN v3"
-		${CROSS_COMPILE}strip u-boot -o u-boot.strip
-		if $PYTHON_CMD -c "import sys; sys.exit(0 if sys.version_info.major == 3 else 1)" 2>/dev/null; then
+		${CROSS_COMPILE}strip u-boot -o u-boot.strip || PACK_FAILED=1
+		if [ "$PACK_FAILED" -ne 0 ]; then
+			:
+		elif $PYTHON_CMD -c "import sys; sys.exit(0 if sys.version_info.major == 3 else 1)" 2>/dev/null; then
 			# Use Python 3 version if available
-			$PYTHON_CMD tools/elftombn_py3.py -f ./u-boot.strip -o "bin/openwrt-${CONFIG_NAME}-u-boot.mbn" -v 3
+			$PYTHON_CMD tools/elftombn_py3.py -f ./u-boot.strip -o "bin/openwrt-${CONFIG_NAME}-u-boot.mbn" -v 3 || PACK_FAILED=1
 		else
 			# Fall back to Python 2.7 version
-			$PYTHON_CMD tools/elftombn.py -f ./u-boot.strip -o "bin/openwrt-${CONFIG_NAME}-u-boot.mbn" -v 3
+			$PYTHON_CMD tools/elftombn.py -f ./u-boot.strip -o "bin/openwrt-${CONFIG_NAME}-u-boot.mbn" -v 3 || PACK_FAILED=1
 		fi
 		OUTPUT_FILE="bin/openwrt-${CONFIG_NAME}-u-boot.mbn"
 		clean_elftombn_intermediate_files "$CONFIG_NAME"
@@ -348,13 +355,15 @@ case $IPQ_TYPE in
 		else
 			echo "IPQ type $IPQ_TYPE uses MBN v6 with SHA-384"
 		fi
-		${CROSS_COMPILE}strip u-boot -o u-boot.strip
-		if $PYTHON_CMD -c "import sys; sys.exit(0 if sys.version_info.major == 3 else 1)" 2>/dev/null; then
+		${CROSS_COMPILE}strip u-boot -o u-boot.strip || PACK_FAILED=1
+		if [ "$PACK_FAILED" -ne 0 ]; then
+			:
+		elif $PYTHON_CMD -c "import sys; sys.exit(0 if sys.version_info.major == 3 else 1)" 2>/dev/null; then
 			# Use Python 3 version if available
-			$PYTHON_CMD tools/elftombn_py3.py -f ./u-boot.strip -o "bin/openwrt-${CONFIG_NAME}-u-boot.mbn" -v 6 -a $IPQ_TYPE
+			$PYTHON_CMD tools/elftombn_py3.py -f ./u-boot.strip -o "bin/openwrt-${CONFIG_NAME}-u-boot.mbn" -v 6 -a $IPQ_TYPE || PACK_FAILED=1
 		else
 			# Fall back to Python 2.7 version
-			$PYTHON_CMD tools/elftombn.py -f ./u-boot.strip -o "bin/openwrt-${CONFIG_NAME}-u-boot.mbn" -v 6 -a $IPQ_TYPE
+			$PYTHON_CMD tools/elftombn.py -f ./u-boot.strip -o "bin/openwrt-${CONFIG_NAME}-u-boot.mbn" -v 6 -a $IPQ_TYPE || PACK_FAILED=1
 		fi
 		OUTPUT_FILE="bin/openwrt-${CONFIG_NAME}-u-boot.mbn"
 		clean_elftombn_intermediate_files "$CONFIG_NAME"
@@ -370,11 +379,12 @@ esac
 	rm -f u-boot.strip
 
 	# Check if the final output file exists
-	if [ -f "$OUTPUT_FILE" ]; then
+	if [ "$PACK_FAILED" -eq 0 ] && [ -s "$OUTPUT_FILE" ]; then
 		echo "U-Boot compilation successful: $OUTPUT_FILE"
 		BUILD_SUCCESS+=("$DEFCONFIG -> $OUTPUT_FILE")
 	else
 		echo "Error: final output file generation failed: $OUTPUT_FILE"
+		rm -f "$OUTPUT_FILE"
 		BUILD_FAILED+=($DEFCONFIG)
 	fi
 	echo ""

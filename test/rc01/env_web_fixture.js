@@ -482,10 +482,13 @@ for (const a of Object.keys(TERM_ACTIONS))
     scenarios['term_' + a + '_' + f] = termScenario(a, f);
 scenarios.term_query_unchanged = termQuery;
 
+let failed = false;
 for (const [name, fn] of Object.entries(scenarios)) {
   if (which === '--list') { process.stderr.write(name + '\n'); continue; }
   if (which && which !== name) continue;
   let ok = true;
   try { fn(); } catch (e) { ok = false; process.stdout.write(name + ': ' + e.message + '\n'); }
+  if (!ok) failed = true;
   process.stderr.write((ok ? 'PASS ' : 'FAIL ') + name + '\n');
 }
+if (failed) process.exitCode = 1;

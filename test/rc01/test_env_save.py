@@ -245,6 +245,9 @@ def compile_c(work, name, code, extra, sanitize=True, syntax_only=False):
     r = subprocess.run(base + san + ["-o", str(exe), str(c)],
                        capture_output=True, text=True)
     if r.returncode != 0 and san:
+        if os.environ.get("RC01_CI_STRICT") == "1":
+            sys.stderr.write(r.stderr)
+            raise SystemExit("sanitizer build failed: %s" % c)
         print("note: sanitizer build failed, building without sanitizers")
         r = subprocess.run(base + ["-o", str(exe), str(c)],
                            capture_output=True, text=True)

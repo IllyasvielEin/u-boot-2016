@@ -1397,7 +1397,7 @@ $(version_h): include/config/uboot.release FORCE
 $(timestamp_h): $(srctree)/Makefile FORCE
 	$(call filechk,timestamp.h)
 #ifdef CONFIG_LWIP_HTTPD
-	cd $(srctree)/failsafe; ./html/makefsdatac; cd -
+	(cd "$(srctree)/failsafe" && ./html/makefsdatac)
 #endif
 
 # ---------------------------------------------------------------------------
