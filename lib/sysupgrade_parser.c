@@ -9,6 +9,9 @@
 #ifdef CONFIG_IPQ40XX
 #include <../board/qca/arm/common/fdt_info.h>
 #endif
+#ifdef CONFIG_CMD_UBI
+#include <ubi_uboot.h>
+#endif
 
 static unsigned long tar_parse_size(const char *s, int len) {
 	unsigned long val = 0;
@@ -134,12 +137,22 @@ int sysupgrade_ubi_init(void) {
 	return run_command(cmd, 0);
 }
 
-static int ubi_write_volume(const char *name, const void *data, size_t size, int required) {
+/*
+ * Volume operations run on the device attached by "ubi part fs"; the name
+ * lookup does not attach again.  An existing volume must be removed
+ * successfully, a missing one is simply created.  "ubi create" returns a
+ * command status, so a failed create stops the following write.
+ */
+static int ubi_write_volume(const char *name, const void *data, size_t size) {
 	char buf[256];
-	char rm_cmd[64];
 
-	snprintf(rm_cmd, sizeof(rm_cmd), "ubi remove %s", name);
-	run_command(rm_cmd, 0);
+	if (ubi_get_volume_id((char *)name) >= 0) {
+		snprintf(buf, sizeof(buf), "ubi remove %s", name);
+		if (run_command(buf, 0) != 0) {
+			printf("%s remove failed\n", name);
+			return -1;
+		}
+	}
 
 	snprintf(buf, sizeof(buf),
 		 "ubi create %s 0x%llx && "
@@ -149,38 +162,85 @@ static int ubi_write_volume(const char *name, const void *data, size_t size, int
 		 (u64)size);
 
 	if (run_command(buf, 0) != 0) {
-		required ? printf("%s write failed\n", name) :
-			   printf("%s skip\n", name);
+		printf("%s write failed\n", name);
 		return -1;
 	}
 	return 0;
 }
 
+#ifdef CONFIG_IPQ9574_XIAOMI_BE10000
+/* RC01 keeps kernel/rootfs/rootfs_data at the fixed volume IDs 0/1/2. */
+static int rc01_check_volume_ids(void) {
+	static const char *const names[] = { "kernel", "rootfs", "rootfs_data" };
+	int i, id;
+
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
+		id = ubi_get_volume_id((char *)names[i]);
+		if (id != i) {
+			printf("UBI volume %s has ID %d, expected %d\n",
+			       names[i], id, i);
+			return -1;
+		}
+	}
+	return 0;
+}
+#endif
+
 int sysupgrade_write_ubi_volumes(sysupgrade_fw_parts *parts, int backup_enabled) {
+#ifdef CONFIG_IPQ9574_XIAOMI_BE10000
+	/*
+	 * Backup volumes would be created with automatic IDs and could take
+	 * the fixed rootfs_data ID 2.  Reject before any UBI attach or change.
+	 */
+	if (backup_enabled) {
+		printf("SYSUPGRADE backup volumes are not supported on this board, nothing written\n");
+		return -1;
+	}
+#endif
+
 	if (sysupgrade_ubi_init() != 0) {
 		printf("UBI init failed\n");
 		return -1;
 	}
 
-	run_command("ubi part fs", 0);
-	run_command("ubi remove rootfs_data", 0);
+	if (run_command("ubi part fs", 0) != 0) {
+		printf("UBI attach failed\n");
+		return -1;
+	}
+
+	if (ubi_get_volume_id("rootfs_data") >= 0 &&
+	    run_command("ubi remove rootfs_data", 0) != 0) {
+		printf("rootfs_data remove failed\n");
+		return -1;
+	}
 
 	if (parts->kernel_data && parts->kernel_size > 0 &&
-	    ubi_write_volume("kernel", parts->kernel_data, parts->kernel_size, 1) != 0)
+	    ubi_write_volume("kernel", parts->kernel_data, parts->kernel_size) != 0)
 		return -1;
 
 	if (parts->rootfs_data && parts->rootfs_size > 0 &&
-	    ubi_write_volume("rootfs", parts->rootfs_data, parts->rootfs_size, 1) != 0)
+	    ubi_write_volume("rootfs", parts->rootfs_data, parts->rootfs_size) != 0)
 		return -1;
 
+	/* Selected backup volumes are required; no rollback of the above. */
 	if (backup_enabled) {
-		if (parts->kernel_data && parts->kernel_size > 0)
-			ubi_write_volume("kernel_1", parts->kernel_data, parts->kernel_size, 0);
-		if (parts->rootfs_data && parts->rootfs_size > 0)
-			ubi_write_volume("rootfs_1", parts->rootfs_data, parts->rootfs_size, 0);
+		if (parts->kernel_data && parts->kernel_size > 0 &&
+		    ubi_write_volume("kernel_1", parts->kernel_data, parts->kernel_size) != 0)
+			return -1;
+		if (parts->rootfs_data && parts->rootfs_size > 0 &&
+		    ubi_write_volume("rootfs_1", parts->rootfs_data, parts->rootfs_size) != 0)
+			return -1;
 	}
 
-	run_command("ubi create rootfs_data", 0);
+	if (run_command("ubi create rootfs_data", 0) != 0) {
+		printf("rootfs_data create failed\n");
+		return -1;
+	}
+
+#ifdef CONFIG_IPQ9574_XIAOMI_BE10000
+	if (rc01_check_volume_ids() != 0)
+		return -1;
+#endif
 
 	return 0;
 }

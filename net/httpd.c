@@ -178,6 +178,94 @@ static int update_bootconfig(void) {
 }
 #endif
 
+#ifdef CONFIG_CMD_NAND
+/*
+ * Raw UBI image on a pure NAND/QSPI NAND boot device.  The primary rootfs
+ * partition is required.  A requested backup adds the physical rootfs_1
+ * partition and must exist.  On RC01 only these targets are used; other
+ * boards also keep their legacy rootfs1/rootfs2 copies when those
+ * partitions exist.  Every target is looked up in the SMEM partition table
+ * and, after the same NAND device selection as "flash", checked for good
+ * block capacity before the first erase.  No UBI attach, no flash probe.
+ */
+static int raw_ubi_nand_upgrade(const ulong size) {
+	char *targets[4];
+	char buf[128];
+	uint32_t offset, part_size;
+	int n = 0, i, ret;
+#ifndef CONFIG_IPQ806X
+	nand_info_t *nand;
+	size_t len;
+#endif
+#ifdef CONFIG_IPQ40XX
+	int nand_dev = is_spi_nand_available();
+#else
+	int nand_dev = CONFIG_NAND_FLASH_INFO_IDX;
+#endif
+
+	targets[n++] = ROOTFS_NAME0;
+#ifndef CONFIG_IPQ9574_XIAOMI_BE10000
+	if (getpart_offset_size(ROOTFS_NAME1, &offset, &part_size) != -ENOENT)
+		targets[n++] = ROOTFS_NAME1;
+	if (getpart_offset_size(ROOTFS_NAME2, &offset, &part_size) != -ENOENT)
+		targets[n++] = ROOTFS_NAME2;
+#endif
+	if (webfailsafe_backup_avail_enabled)
+		targets[n++] = ROOTFS_NAME_1;
+
+	/* Same device selection (and board hook) as the "flash" command. */
+	snprintf(buf, sizeof(buf), "nand device %d", nand_dev);
+	if (execute_command(buf) != 0)
+		return -1;
+#ifndef CONFIG_IPQ806X
+	if (nand_curr_device < 0 ||
+	    nand_curr_device >= CONFIG_SYS_MAX_NAND_DEVICE ||
+	    !nand_info[nand_curr_device].name ||
+	    !nand_info[nand_curr_device].writesize) {
+		printf("\n* No NAND device available, nothing written *\n");
+		return -1;
+	}
+	nand = &nand_info[nand_curr_device];
+	if (size > (ulong)~0U - nand->writesize) {
+		printf("\n* Image too large, nothing written *\n");
+		return -1;
+	}
+	len = ALIGN(size, nand->writesize);
+#endif
+
+	for (i = 0; i < n; i++) {
+		ret = getpart_offset_size(targets[i], &offset, &part_size);
+		if (ret) {
+			printf("\n* Partition %s not available (%d), nothing written *\n",
+			       targets[i], ret);
+			return -1;
+		}
+#ifndef CONFIG_IPQ806X
+		/* IPQ806X switches layouts per target in "flash"; checked there. */
+		ret = nand_check_range_capacity(nand, offset, part_size, len);
+		if (ret) {
+			printf("\n* Partition %s cannot hold the image (%d), nothing written *\n",
+			       targets[i], ret);
+			return -1;
+		}
+#endif
+	}
+
+	for (i = 0; i < n; i++) {
+		snprintf(buf, sizeof(buf), "flash %s 0x%lx 0x%lx",
+			 targets[i], UPLOAD_ADDR, size);
+		if (execute_command(buf) != 0) {
+			printf("\n* Failed to write %s *\n", targets[i]);
+			if (i)
+				printf("* %d of %d targets were written before; the upgrade may be partially complete, no rollback *\n",
+				       i, n);
+			return -1;
+		}
+	}
+	return 0;
+}
+#endif
+
 static int do_firmware_upgrade(const ulong size) {
 	char buf[512];
 	uint32_t flash_type;
@@ -300,6 +388,11 @@ static int do_firmware_upgrade(const ulong size) {
 			int fw_type = check_fw_type((void *)UPLOAD_ADDR);
 			if (fw_type == FW_TYPE_UBI) {
 				print_upgrade_warning("FIRMWARE");
+#ifdef CONFIG_CMD_NAND
+				/* NOR+NAND keeps its attribute/prefix routing below. */
+				if (flash_type != SMEM_BOOT_NORPLUSNAND)
+					return raw_ubi_nand_upgrade(size);
+#endif
 				if (webfailsafe_backup_avail_enabled)
 					sprintf(buf, "flash %s 0x%lx $filesize && flash %s 0x%lx $filesize && flash %s 0x%lx $filesize && flash %s 0x%lx $filesize", ROOTFS_NAME0, UPLOAD_ADDR, ROOTFS_NAME1, UPLOAD_ADDR, ROOTFS_NAME2, UPLOAD_ADDR, ROOTFS_NAME_1, UPLOAD_ADDR);
 				else

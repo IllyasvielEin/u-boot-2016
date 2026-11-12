@@ -743,6 +743,13 @@ char * const argv[])
 exit:
 	if (ret)
 		flash_type_new = -1;
+	/*
+	 * Command boundary: keep CMD_RET_USAGE, report every other internal
+	 * non-zero status (-ENOENT, -EINVAL, ...) as CMD_RET_FAILURE.  Hush
+	 * treats values below -1 as "exit" and would turn them into success.
+	 */
+	if (ret != CMD_RET_SUCCESS && ret != CMD_RET_USAGE)
+		ret = CMD_RET_FAILURE;
 	return ret;
 }
 

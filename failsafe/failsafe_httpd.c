@@ -1821,7 +1821,8 @@ void failsafe_httpd_poll(void) {
 		upgrade_status = 2;
 		httpd_poll_wait(1500);
 
-		if (do_http_upgrade(net_boot_file_size, webfailsafe_upgrade_type) < 0) {
+		/* Handlers return -1 or a failed command status (+1). */
+		if (do_http_upgrade(net_boot_file_size, webfailsafe_upgrade_type) != 0) {
 			do_http_progress(WEBFAILSAFE_PROGRESS_UPGRADE_FAILED);
 			upgrade_status = 3;
 			httpd_poll_wait(2000);

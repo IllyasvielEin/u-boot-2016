@@ -341,6 +341,22 @@ long long ubi_get_volume_size(char *volume)
 	return vol->used_bytes;
 }
 
+/* ID of a volume on the already attached UBI device, or -ENODEV. */
+int ubi_get_volume_id(char *volume)
+{
+	int i;
+
+	if (!ubi_dev.selected || !ubi)
+		return -ENODEV;
+
+	for (i = 0; i < ubi->vtbl_slots; i++) {
+		if (ubi->volumes[i] && !strcmp(ubi->volumes[i]->name, volume))
+			return ubi->volumes[i]->vol_id;
+	}
+
+	return -ENODEV;
+}
+
 int ubi_volume_read(char *volume, char *buf, size_t size)
 {
 	int err, lnum, off, len, tbuf_size;
@@ -623,8 +639,19 @@ static int do_ubi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 			printf("No size specified -> Using max size (%lld)\n", size);
 		}
 		/* E.g., create volume */
-		if (argc == 3)
-			return ubi_create_vol(argv[2], size, dynamic);
+		if (argc == 3) {
+			/*
+			 * ubi_create_volume() returns -ENOSPC/-EROFS/...; hush
+			 * treats values below -1 as "exit" (success), so return
+			 * a command status and keep the errno in the message.
+			 */
+			err = ubi_create_vol(argv[2], size, dynamic);
+			if (err) {
+				printf("UBI create %s failed: %d\n", argv[2], err);
+				return CMD_RET_FAILURE;
+			}
+			return CMD_RET_SUCCESS;
+		}
 	}
 
 	if (strncmp(argv[1], "remove", 6) == 0) {
