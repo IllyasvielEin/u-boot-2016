@@ -44,7 +44,7 @@ import test_nand_write_safety as ub01  # noqa: E402  (symbol extraction)
 ROOT = ub01.ROOT
 FIXTURE = HERE / "upgrade_results_fixture.c"
 # UB01, accepted; the last tree before UB02.
-BASELINE_REV = "3e77a17bf0878383e68f8a3f509461d428602771"
+BASELINE_REV = "e2b58fad47cf4e88a80a85a9d952b39c74bdbbe6"
 
 HUSH = "common/cli_hush.c"
 CLI = "common/cli.c"

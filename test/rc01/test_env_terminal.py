@@ -11,7 +11,7 @@ import test_nand_write_safety as ex
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-BASELINE = "603ce5954c17eaed43d918707d3dd7d6411e6942"
+BASELINE = "fe4d491dafe7ad01ff3e0196496539cb071f59e1"
 NVEDIT = "common/cmd_nvedit.c"
 
 

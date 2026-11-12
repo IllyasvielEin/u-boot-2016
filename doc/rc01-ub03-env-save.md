@@ -8,7 +8,7 @@
 
 ## 独立验收
 
-2026-11-13 [Astra 复验](../../docs/reviews/uboot-ub03-astra-recheck-2026-11-13.md)
+2026-11-13 Astra 复验（公开集成与版本对应见[集成记录](rc01-public-integration.md)）
 接受 B1/B2 两项小修，原 BLOCK 保留。受检生产文件摘要与复验版本一致；
 长期 UB03、UB01/UB02 组合回归全部通过，独立 NAND 边界 48/48、终端与通用
 setenv 当前/基线成对对照 26/26。未重复目标构建，沿用主线程最终 ARM32 和生成资源证据。

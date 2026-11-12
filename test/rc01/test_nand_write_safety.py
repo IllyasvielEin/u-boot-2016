@@ -7,7 +7,7 @@ boundaries, not line numbers), compiles them with the simulated NAND in
 nand_write_safety_fixture.c and runs the scenarios.
 
 The API scenarios are additionally built against the baseline commit
-(the import before UB01) and must FAIL there, which shows that they hit
+(the public four-port revision before UB01) and must FAIL there, which shows that they hit
 the original defects.  The baseline write_to_flash is also linked into
 the main build to compare the unchanged MMC/NOR command routes.  When the
 baseline commit is unavailable these comparisons are skipped and reported.
@@ -29,7 +29,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]  # uboot/
 FIXTURE = HERE / "nand_write_safety_fixture.c"
-BASELINE_REV = "c08230eb454bc5dd3a87cbbe1f78be42cffb23b4"
+BASELINE_REV = "54a2eb299d190abfabca58fe061bd7dcaa2e6c19"
 
 NAND_H = "include/nand.h"
 NAND_UTIL = "drivers/mtd/nand/nand_util.c"

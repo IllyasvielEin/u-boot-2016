@@ -44,7 +44,7 @@ import test_nand_write_safety as ub01  # noqa: E402  (symbol extraction)
 
 ROOT = ub01.ROOT
 # UB02, accepted; the last tree before UB03.
-BASELINE_REV = "603ce5954c17eaed43d918707d3dd7d6411e6942"
+BASELINE_REV = "fe4d491dafe7ad01ff3e0196496539cb071f59e1"
 
 ENV_NAND = "common/env_nand.c"
 NAND_H = "include/nand.h"
